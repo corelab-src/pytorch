@@ -69,6 +69,8 @@ class HelperWrapper(object):
         'cond' : cond,
         'loop' : loop,
         'db_input' : db_input,
+        'skip' : skip,
+        'switch' : switch,
     }
 
     def __init__(self, wrapped):

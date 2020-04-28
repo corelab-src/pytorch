@@ -15,6 +15,8 @@ from caffe2.proto import caffe2_pb2
 from caffe2.python import scope, utils, workspace
 from caffe2.python.control_ops_grad import \
     gen_do_gradient, gen_if_gradient, gen_while_gradient, disambiguate_grad_if_op_output
+from caffe2.python.control_ops_grad import \
+    gen_skip_gradient, gen_switch_gradient
 
 import caffe2.python._import_c_extension as C
 

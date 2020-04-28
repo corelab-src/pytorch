@@ -261,3 +261,52 @@ def add_while_op(
         while_net.CreateScope([], [cond_workspace_blob])
     while_net.While(while_inputs, while_outputs, **while_args)
     while_net.AddExternalOutput(*while_outputs)
+
+def add_skip_op(
+    org_net, input_blobs, lexical_scope, target_net,
+    org_output_blobs, target_output_blobs, empty_output_blobs):
+
+    input_blob_names, output_blob_names = get_external_blob_names (
+        target_net, lexical_scope)
+
+    empty_net = core.Net('empty_' + target_net.Name())
+
+    for (org_output_blob, target_output_blob, empty_output_blob) in zip(org_output_blobs, target_output_blobs, empty_output_blobs):
+        target_net.Copy(target_output_blob, org_output_blob)
+        empty_net.Copy(empty_output_blob, org_output_blob)
+
+    skip_inputs = input_blobs
+    skip_inputs += [core.BlobReference(name=b, net=None) for b in input_blob_names]
+    skip_outputs = [core.ScopedBlobReference(name=b, net=None) for b in org_output_blobs]
+    skip_outputs += [core.BlobReference(name=b, net=None) for b in output_blob_names]
+
+    org_net.Skip(skip_inputs, skip_outputs, target_net=target_net.Proto(), empty_net=empty_net.Proto())
+
+    return skip_outputs[0]
+
+def add_switch_op(
+    switch_net, input_blobs, lexical_scope, subnets, blob_output_map):
+
+    input_blob_names = set()
+    output_blob_names = set()
+
+    for subnet in subnets:
+        subnet_input_blob_names, subnet_output_blob_names = get_external_blob_names (subnet, lexical_scope)
+
+        for (switch_blob_name, subnet_blob_name) in zip(blob_output_map[switch_net], blob_output_map[subnet]):
+            subnet.Copy(subnet_blob_name, switch_blob_name)
+
+        input_blob_names |= subnet_input_blob_names
+        output_blob_names |= subnet_output_blob_names
+
+    switch_inputs = input_blobs
+    switch_inputs += [core.BlobReference(name=b, net=None) for b in input_blob_names]
+
+    switch_outputs = [core.ScopedBlobReference(name=b, net=None) for b in blob_output_map[switch_net]]
+    switch_outputs += [core.BlobReference(name=b, net=None) for b in output_blob_names]
+
+    switch_net.Switch(switch_inputs, switch_outputs,
+        subnets=[ subnet.Proto() for subnet in subnets ]
+    )
+
+    return switch_outputs[0]

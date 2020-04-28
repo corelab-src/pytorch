@@ -434,6 +434,132 @@ def gen_if_gradient(op, g_output):
     g_input = [grad_map.get(i, None) for i in op_input]
     return grad_ops + [gradient_if_def], g_input
 
+def gen_skip_gradient(op, g_output):
+    from caffe2.python.core import BlobReference
+    assert op.type == "Skip", "Expected Skip op"
+
+    # first input is the condition blob
+    assert len(op.input) > 0, "Expected at least one input in Skip op"
+    assert len(op.output) == len(g_output), \
+        "Different number of gradient blobs and Skip op outputs"
+
+    op_input = [str(i) for i in op.input]
+    op_output = [str(o) for o in op.output]
+
+    init_grad_map = {}
+
+    for output_name, grad_output_name in zip(op_output, g_output):
+        if grad_output_name:
+            init_grad_map[BlobReference(output_name)] = BlobReference(grad_output_name)
+
+    # shouldn't call without at least one output gradient available
+    assert len(init_grad_map) > 0, "Empty initial gradient map for Skip op"
+
+    target_net = _get_net_argument(op, "target_net")
+    assert target_net, "Expected target_net in Skip op"
+
+    target_grad_net, target_grad_map, target_input_names, target_output_names = \
+        _gen_subnet_gradient(target_net, init_grad_map)
+    assert target_grad_net, "Failed to get gradient net for target in Skip op"
+
+    empty_net = _get_net_argument(op, "empty_net")
+    assert empty_net, "Expected empty_net in Skip op"
+
+    empty_grad_net, empty_grad_map, empty_input_names, empty_output_names = \
+        _gen_subnet_gradient(empty_net, init_grad_map)
+    assert empty_grad_net, "Failed to get gradient net for empty in Skip op"
+
+    zero_empty_net = _gen_grad_zero_init_ops_with_device_option(
+      init_grad_map, target_grad_map,
+      set([ target_grad_map[i] for i in op_input if i in target_grad_map ]) - empty_output_names,
+      op.device_option)
+
+    empty_grad_net.op.extend(zero_empty_net)
+
+    # make sure select blob is the first in the list
+    input_names = op_input[0:3] + list(target_input_names & empty_input_names)
+    output_names = list(target_output_names)
+
+    gradient_skip_def = _prepare_gradient_skip_op(
+        fwd_op=op,
+        input_names=input_names,
+        output_names=output_names,
+        target_net=target_grad_net,
+        empty_net=empty_grad_net)
+
+    g_input = [ target_grad_map.get(i, None) for i in op_input ]
+    return [ gradient_skip_def ], g_input
+
+def gen_switch_gradient(op, g_output):
+    from caffe2.python.core import BlobReference
+    assert op.type == "Switch", "Expected Switch op"
+
+    # first input is the condition blob
+    assert len(op.input) > 0, "Expected at least one input in Switch op"
+    assert len(op.output) == len(g_output), \
+        "Different number of gradient blobs and Switch op outputs"
+
+    op_input = [str(i) for i in op.input]
+    op_output = [str(o) for o in op.output]
+
+    init_grad_map = {}
+
+    for output_name, grad_output_name in zip(op_output, g_output):
+        if grad_output_name:
+            init_grad_map[BlobReference(output_name)] = BlobReference(grad_output_name)
+
+    # shouldn't call without at least one output gradient available
+    assert len(init_grad_map) > 0, "Empty initial gradient map for Switch op"
+    subnets = _get_nets_argument(op, "subnets")
+    assert subnets, "Expected subnets in Switch op"
+
+    grad_net_list = []
+    grad_map_list = []
+    input_names_list = []
+    output_names_list = []
+
+    total_grad_map = {}
+    total_input_names = set()
+    total_output_names = set()
+
+    for subnet in subnets:
+        subnet_grad_net, subnet_grad_map, subnet_input_names, subnet_output_names = \
+          _gen_subnet_gradient(subnet, init_grad_map)
+        assert subnet_grad_net, "Failed to get gradient net for then in Switch op"
+        grad_net_list.append(subnet_grad_net)
+        grad_map_list.append(subnet_grad_map)
+        input_names_list.append(subnet_input_names)
+        output_names_list.append(subnet_output_names)
+
+        total_grad_map.update(subnet_grad_map)
+        total_input_names |= subnet_input_names
+        total_output_names |= subnet_output_names
+
+    for subnet_idx in range(0, len(subnets)):
+        total_input_names &= input_names_list[subnet_idx]
+
+        for other_subnet_idx in range(0, len(subnets)):
+            if subnet_idx != other_subnet_idx:
+                other_grad_output_names = set(
+                    [ grad_map_list[other_subnet_idx][i] for i in op_input if i in grad_map_list[other_subnet_idx]]
+                ) - output_names_list[subnet_idx]
+                zero_other_net = _gen_grad_zero_init_ops_with_device_option(
+                    init_grad_map, grad_map_list[other_subnet_idx], other_grad_output_names,
+                    op.device_option)
+                grad_net_list[subnet_idx].op.extend(zero_other_net)
+
+    # make sure select blob is the first in the list
+    input_names = op_input[0:3] + list(total_input_names)
+    output_names = list(total_output_names)
+
+    gradient_switch_def = _prepare_gradient_switch_op(
+        fwd_op=op,
+        input_names=input_names,
+        output_names=output_names,
+        subnets=grad_net_list)
+
+    g_input = [ total_grad_map.get(i, None) for i in op_input ]
+    return [ gradient_switch_def ], g_input
 
 def _gen_subnet_gradient(subnet, init_grad):
     grad_ops, grad_names_map = _gen_subgradient_pass(
@@ -472,6 +598,12 @@ def getNetArgument(op, net_name):
     """A wrapper for external call"""
     return _get_net_argument(op, net_name)
 
+def _get_nets_argument(op, nets_name):
+    for arg in op.arg:
+        if arg.name and arg.name == nets_name:
+            assert arg.nets, "Expected non empty nets argument " + nets_name
+            return arg.nets
+    return None
 
 def _gen_subgradient_pass(subnet, init_grad):
     from caffe2.python.core import IR
@@ -661,6 +793,44 @@ def _gen_grad_zero_init_ops(init_grad_map, grad_map, grad_output_names):
             grad_init_ops.append(grad_init_op)
     return grad_init_ops
 
+def _gen_grad_zero_init_ops_with_device_option(
+  init_grad_map, grad_map, grad_output_names, device_option):
+    grad_init_ops = []
+    for grad_output in grad_output_names:
+        # get the corresponding output name blob and use it in ConstantFill
+        # so that grad_output has the same shape
+        output_name = None
+        for o, g in grad_map.items():
+            if g == grad_output:
+                output_name = o
+                break
+        assert output_name, "Unknown gradient output " + grad_output
+
+        grad_init_op = None
+        # make sure that we do not overwrite existing gradients with zeros
+        if output_name in init_grad_map:
+            init_grad_name = init_grad_map[output_name]
+            # in case we use a different gradient blob name, copy gradient
+            if init_grad_name != grad_output:
+                grad_init_op = caffe2_pb2.OperatorDef()
+                grad_init_op.type = "Copy"
+                grad_init_op.input.extend([str(init_grad_name)])
+                grad_init_op.output.extend([str(grad_output)])
+                grad_init_op.device_option.CopyFrom(device_option)
+        else:
+            grad_init_op = caffe2_pb2.OperatorDef()
+            grad_init_op.type = "ConstantFill"
+            grad_init_op.input.extend([output_name])
+            grad_init_op.output.extend([grad_output])
+            grad_init_op.device_option.CopyFrom(device_option)
+            value_arg = caffe2_pb2.Argument()
+            value_arg.name = "value"
+            value_arg.f = 0.0
+            grad_init_op.arg.extend([value_arg])
+
+        if grad_init_op:
+            grad_init_ops.append(grad_init_op)
+    return grad_init_ops
 
 def _prepare_gradient_if_op(
         fwd_op, input_names, output_names, then_grad_net, else_grad_net):
@@ -704,3 +874,57 @@ def disambiguate_grad_if_op_output(grad_op, idx, new_grad_output):
                 if out == old_grad_out_match:
                     op.output[i] = new_grad_output
     grad_op.output[idx] = new_grad_output
+
+def _prepare_gradient_skip_op(
+        fwd_op, input_names, output_names, target_net, empty_net):
+    gradient_skip_def = caffe2_pb2.OperatorDef()
+    gradient_skip_def.CopyFrom(fwd_op)
+    del gradient_skip_def.input[:]
+    gradient_skip_def.input.extend(input_names)
+    del gradient_skip_def.output[:]
+    gradient_skip_def.output.extend(output_names)
+
+    target_net_arg = caffe2_pb2.Argument()
+    target_net_arg.name = "target_net"
+    target_net_arg.n.CopyFrom(target_net)
+
+    empty_net_arg = caffe2_pb2.Argument()
+    empty_net_arg.name = "empty_net"
+    empty_net_arg.n.CopyFrom(empty_net)
+
+    gradient_args = [ target_net_arg, empty_net_arg ]
+
+    del gradient_skip_def.arg[:]
+    gradient_skip_def.arg.extend(gradient_args)
+
+    if gradient_skip_def.name:
+        gradient_skip_def.name += "_grad"
+    del gradient_skip_def.control_input[:]
+
+    gradient_skip_def.is_gradient_op = True
+    return gradient_skip_def
+
+def _prepare_gradient_switch_op(
+        fwd_op, input_names, output_names, subnets):
+    gradient_switch_def = caffe2_pb2.OperatorDef()
+    gradient_switch_def.CopyFrom(fwd_op)
+    del gradient_switch_def.input[:]
+    gradient_switch_def.input.extend(input_names)
+    del gradient_switch_def.output[:]
+    gradient_switch_def.output.extend(output_names)
+
+    subnets_arg = caffe2_pb2.Argument()
+    subnets_arg.name = "subnets"
+    subnets_arg.nets.extend(subnets)
+
+    gradient_args = [ subnets_arg ]
+
+    del gradient_switch_def.arg[:]
+    gradient_switch_def.arg.extend(gradient_args)
+
+    if gradient_switch_def.name:
+        gradient_switch_def.name += "_grad"
+    del gradient_switch_def.control_input[:]
+
+    gradient_switch_def.is_gradient_op = True
+    return gradient_switch_def

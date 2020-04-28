@@ -253,6 +253,12 @@ class ComputeBlobRecyclingForDag {
       if (optimized_net.op(i).type().find("RecurrentNetwork") == 0) {
         apply_recurrent_blob_assignments(optimized_net.mutable_op(i));
       }
+      else if (optimized_net.op(i).type().find("Skip") == 0) {
+        apply_skip_blob_assignments(optimized_net.mutable_op(i));
+      }
+      else if (optimized_net.op(i).type().find("Switch") == 0) {
+        apply_switch_blob_assignments(optimized_net.mutable_op(i));
+      }
 
       for (int j = 0; j < optimized_net.op(i).input_size(); ++j) {
         const string& input_name =
@@ -309,6 +315,34 @@ class ComputeBlobRecyclingForDag {
         Argument* map_arg = op->add_arg();
         map_arg->set_name(b + ".rename");
         map_arg->set_s(mapped);
+      }
+    }
+  }
+
+  void apply_skip_blob_assignments(OperatorDef* op) {
+   for (int i = 0; i < op->arg_size(); i++) {
+      Argument* arg = op->mutable_arg(i);
+      const string& name = arg->name();
+
+      if (name == "target_net" || name == "empty_net") {
+        NetDef* subnet_ref = arg->mutable_n();
+        NetDef optimized_subnet = apply_assignments(*subnet_ref);
+        subnet_ref->CopyFrom(optimized_subnet);
+      }
+    }
+  }
+
+  void apply_switch_blob_assignments(OperatorDef* op) {
+   for (int i = 0; i < op->arg_size(); i++) {
+      Argument* arg = op->mutable_arg(i);
+      const string& name = arg->name();
+
+      if (name == "subnets") {
+        for(int j = 0; j < arg->nets_size(); j++) {
+          NetDef* subnet_ref = arg->mutable_nets(j);
+          NetDef optimized_subnet = apply_assignments(*subnet_ref);
+          subnet_ref->CopyFrom(optimized_subnet);
+        }
       }
     }
   }
