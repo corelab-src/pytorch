@@ -1162,6 +1162,8 @@ class GradientRegistry(object):
 GradientRegistry.RegisterGradient('Do')(gen_do_gradient)
 GradientRegistry.RegisterGradient('If')(gen_if_gradient)
 GradientRegistry.RegisterGradient('While')(gen_while_gradient)
+GradientRegistry.RegisterGradient('Skip')(gen_skip_gradient)
+GradientRegistry.RegisterGradient('Switch')(gen_switch_gradient)
 
 
 def get_ssa(net, blob_versions=None):
